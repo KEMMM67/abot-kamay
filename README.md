@@ -186,3 +186,4 @@ Planned next: an SMS gateway adapter (sign-in answers 503 in production until on
 - ID images are stored in our restricted bucket for manual review (`provider = MANUAL_REVIEW`), which departs from TECHNICAL_PLAN.md's "raw ID images stay with the vendor". They must be deleted after the retention period (the purge job is not built yet); a KYC vendor can take over through `identity_verifications.provider` / `provider_ref`. Run a DPIA before launch (Data Privacy Act, RA 10173).
 - Local database tests: without Docker, the integration tests can run against an in-process PGlite with all migrations applied. PGlite's socket server mishandles errors in the extended query protocol, so use a driver adapter rather than the socket for anything that expects database errors.
 Trigger Vercel build
+v2
