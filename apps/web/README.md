@@ -181,3 +181,7 @@ and `X-Request-Id`, the API lists them in `Access-Control-Expose-Headers`.
 ## Scripts
 
 `dev`, `build`, `start`, `lint` (oxlint), `typecheck` (`next typegen` + `tsc`), `format`, `format:check`.
+
+
+
+
