@@ -1,0 +1,411 @@
+-- 20260925000200_creator_posts_kyc/migration.sql
+--
+-- Platform pivot: verified user-generated posts, a strict KYC front gate, flexible funding goals, and
+-- creator-posted proof of spending. Based on
+--   prisma migrate diff --from-schema <previous schema> --to-schema prisma/schema.prisma --script
+-- with three hand edits: kyc_status values are RENAMED (Prisma would recreate the type and fail on
+-- existing rows), new NOT NULL columns are backfilled before the constraint is set, and the
+-- guarantees Prisma cannot express are added in section 4.
+--
+-- Guarantees added here (keep them; the CI guard rejects migrations that drop them):
+--   1. KYC front gate: a campaign can only be inserted, or set ACTIVE, by a creator whose account is
+--      ACTIVE and whose kyc_status is VERIFIED and not expired. The creator never changes.
+--   2. Creator payouts go only to the campaign's own creator, and only while that creator is verified.
+--   3. Funding type and goal agree: FIXED has goal_minor > 0, OPEN_ENDED has no goal.
+--   4. Spending reports are written by the campaign's creator; their facts are immutable (only the
+--      review columns change), they are never deleted, and they form one hash chain per campaign.
+--   5. At most one identity check waiting for review per user; a reviewer never decides their own.
+--
+-- Values added to existing enums with ADD VALUE (kyc_status REVOKED, disbursement_method
+-- CREATOR_PAYOUT) are only referenced inside PL/pgSQL function bodies here, which PostgreSQL
+-- resolves when the function first runs, after this migration has committed.
+
+-- ---------------------------------------------------------------------------------------------
+-- 1. Enums
+-- ---------------------------------------------------------------------------------------------
+CREATE TYPE "identity_check_status" AS ENUM ('SUBMITTED', 'APPROVED', 'REJECTED', 'WITHDRAWN');
+
+CREATE TYPE "government_id_type" AS ENUM ('PHILSYS', 'PASSPORT', 'DRIVERS_LICENSE', 'UMID', 'SSS', 'PRC', 'POSTAL', 'VOTERS');
+
+CREATE TYPE "kyc_document_kind" AS ENUM ('ID_FRONT', 'ID_BACK', 'SELFIE_WITH_ID');
+
+CREATE TYPE "media_purpose" AS ENUM ('POST_MEDIA', 'CONSENT_EVIDENCE', 'KYC_DOCUMENT', 'SPENDING_PROOF', 'VERIFICATION_EVIDENCE', 'DISBURSEMENT_PROOF');
+
+CREATE TYPE "funding_type" AS ENUM ('FIXED', 'OPEN_ENDED');
+
+CREATE TYPE "creator_relationship" AS ENUM ('SELF', 'FAMILY', 'FRIEND_OR_NEIGHBOR', 'COMMUNITY_WORKER', 'PASSERBY', 'OTHER');
+
+CREATE TYPE "spending_proof_kind" AS ENUM ('RECEIPT', 'ITEM_PHOTO', 'HANDOVER_PHOTO');
+
+-- Renaming keeps every existing row and the column default (NOT_STARTED -> UNVERIFIED,
+-- PENDING -> PENDING_ID). REVOKED is appended, matching the order in schema.prisma.
+ALTER TYPE "kyc_status" RENAME VALUE 'NOT_STARTED' TO 'UNVERIFIED';
+ALTER TYPE "kyc_status" RENAME VALUE 'PENDING' TO 'PENDING_ID';
+ALTER TYPE "kyc_status" ADD VALUE 'REVOKED';
+
+ALTER TYPE "disbursement_method" ADD VALUE 'CREATOR_PAYOUT';
+
+-- ---------------------------------------------------------------------------------------------
+-- 2. Changed tables (with backfills for existing rows)
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE "users" ADD COLUMN     "kyc_expires_at" TIMESTAMPTZ(3),
+ADD COLUMN     "kyc_verified_at" TIMESTAMPTZ(3),
+ALTER COLUMN "kyc_status" SET DEFAULT 'UNVERIFIED';
+
+UPDATE "users" SET "kyc_verified_at" = "updated_at" WHERE "kyc_status" = 'VERIFIED' AND "kyc_verified_at" IS NULL;
+
+ALTER TABLE "media_assets" ADD COLUMN "purpose" "media_purpose";
+
+UPDATE "media_assets" m
+   SET "purpose" = CASE
+         WHEN EXISTS (SELECT 1 FROM "disbursement_proofs" p WHERE p."media_asset_id" = m."id")
+           THEN 'DISBURSEMENT_PROOF'::"media_purpose"
+         ELSE 'VERIFICATION_EVIDENCE'::"media_purpose"
+       END;
+
+ALTER TABLE "media_assets" ALTER COLUMN "purpose" SET NOT NULL;
+
+-- Coordinator-run campaigns created before the pivot become posts by the coordinator's own account.
+ALTER TABLE "campaigns" DROP CONSTRAINT "campaigns_coordinator_id_fkey";
+
+ALTER TABLE "campaigns" ADD COLUMN     "creator_id" UUID,
+ADD COLUMN     "creator_relationship" "creator_relationship",
+ADD COLUMN     "funding_type" "funding_type",
+ADD COLUMN     "review_note" TEXT,
+ALTER COLUMN "coordinator_id" DROP NOT NULL,
+ALTER COLUMN "goal_minor" DROP NOT NULL;
+
+UPDATE "campaigns" c
+   SET "creator_id" = cp."user_id",
+       "creator_relationship" = 'COMMUNITY_WORKER',
+       "funding_type" = 'FIXED'
+  FROM "coordinator_profiles" cp
+ WHERE cp."id" = c."coordinator_id";
+
+ALTER TABLE "campaigns" ALTER COLUMN "creator_id" SET NOT NULL,
+ALTER COLUMN "creator_relationship" SET NOT NULL,
+ALTER COLUMN "funding_type" SET NOT NULL;
+
+ALTER TABLE "milestones" ALTER COLUMN "budget_minor" DROP NOT NULL;
+
+-- ---------------------------------------------------------------------------------------------
+-- 3. New tables, indexes and foreign keys (as generated by Prisma)
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE "auth_sessions" (
+    "id" UUID NOT NULL,
+    "user_id" UUID NOT NULL,
+    "token_hash" TEXT NOT NULL,
+    "expires_at" TIMESTAMPTZ(3) NOT NULL,
+    "revoked_at" TIMESTAMPTZ(3),
+    "last_seen_at" TIMESTAMPTZ(3),
+    "ip" TEXT,
+    "user_agent" TEXT,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "auth_sessions_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "otp_challenges" (
+    "id" UUID NOT NULL,
+    "phone_e164" TEXT NOT NULL,
+    "code_hash" TEXT NOT NULL,
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "expires_at" TIMESTAMPTZ(3) NOT NULL,
+    "consumed_at" TIMESTAMPTZ(3),
+    "ip" TEXT,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "otp_challenges_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "identity_verifications" (
+    "id" UUID NOT NULL,
+    "user_id" UUID NOT NULL,
+    "status" "identity_check_status" NOT NULL DEFAULT 'SUBMITTED',
+    "provider" TEXT NOT NULL DEFAULT 'MANUAL_REVIEW',
+    "provider_ref" TEXT,
+    "id_type" "government_id_type" NOT NULL,
+    "display_name" TEXT NOT NULL,
+    "challenge_code" TEXT NOT NULL,
+    "submitted_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "reviewer_id" UUID,
+    "decided_at" TIMESTAMPTZ(3),
+    "rejection_reason" TEXT,
+    "review_note" TEXT,
+    "id_expires_on" DATE,
+    "media_purge_after" TIMESTAMPTZ(3),
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ(3) NOT NULL,
+
+    CONSTRAINT "identity_verifications_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "identity_documents" (
+    "id" UUID NOT NULL,
+    "verification_id" UUID NOT NULL,
+    "kind" "kyc_document_kind" NOT NULL,
+    "media_asset_id" UUID NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "identity_documents_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "campaign_media" (
+    "id" UUID NOT NULL,
+    "campaign_id" UUID NOT NULL,
+    "media_asset_id" UUID NOT NULL,
+    "position" INTEGER NOT NULL,
+    "alt_text" TEXT,
+    "shows_minor" BOOLEAN NOT NULL DEFAULT false,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "campaign_media_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "spending_reports" (
+    "id" UUID NOT NULL,
+    "campaign_id" UUID NOT NULL,
+    "milestone_id" UUID,
+    "author_id" UUID NOT NULL,
+    "title" TEXT NOT NULL,
+    "note" TEXT,
+    "amount_minor" BIGINT NOT NULL,
+    "currency" CHAR(3) NOT NULL DEFAULT 'PHP',
+    "spent_on" DATE NOT NULL,
+    "merchant_name" TEXT,
+    "prev_hash" TEXT NOT NULL,
+    "hash" TEXT NOT NULL,
+    "status" "proof_status" NOT NULL DEFAULT 'SUBMITTED',
+    "reviewed_by_id" UUID,
+    "reviewed_at" TIMESTAMPTZ(3),
+    "review_note" TEXT,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "spending_reports_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "spending_report_media" (
+    "id" UUID NOT NULL,
+    "report_id" UUID NOT NULL,
+    "media_asset_id" UUID NOT NULL,
+    "kind" "spending_proof_kind" NOT NULL,
+    "position" INTEGER NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "spending_report_media_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX "auth_sessions_token_hash_key" ON "auth_sessions"("token_hash");
+CREATE INDEX "auth_sessions_user_id_idx" ON "auth_sessions"("user_id");
+CREATE INDEX "auth_sessions_expires_at_idx" ON "auth_sessions"("expires_at");
+CREATE INDEX "otp_challenges_phone_e164_created_at_idx" ON "otp_challenges"("phone_e164", "created_at");
+CREATE INDEX "otp_challenges_ip_created_at_idx" ON "otp_challenges"("ip", "created_at");
+CREATE UNIQUE INDEX "identity_verifications_provider_ref_key" ON "identity_verifications"("provider_ref");
+CREATE INDEX "identity_verifications_user_id_submitted_at_idx" ON "identity_verifications"("user_id", "submitted_at");
+CREATE INDEX "identity_verifications_status_submitted_at_idx" ON "identity_verifications"("status", "submitted_at");
+CREATE UNIQUE INDEX "identity_documents_media_asset_id_key" ON "identity_documents"("media_asset_id");
+CREATE UNIQUE INDEX "identity_documents_verification_id_kind_key" ON "identity_documents"("verification_id", "kind");
+CREATE UNIQUE INDEX "campaign_media_media_asset_id_key" ON "campaign_media"("media_asset_id");
+CREATE UNIQUE INDEX "campaign_media_campaign_id_position_key" ON "campaign_media"("campaign_id", "position");
+CREATE UNIQUE INDEX "spending_reports_hash_key" ON "spending_reports"("hash");
+CREATE INDEX "spending_reports_campaign_id_created_at_idx" ON "spending_reports"("campaign_id", "created_at");
+CREATE INDEX "spending_reports_status_created_at_idx" ON "spending_reports"("status", "created_at");
+CREATE INDEX "spending_reports_author_id_idx" ON "spending_reports"("author_id");
+CREATE UNIQUE INDEX "spending_reports_campaign_id_prev_hash_key" ON "spending_reports"("campaign_id", "prev_hash");
+CREATE UNIQUE INDEX "spending_report_media_media_asset_id_key" ON "spending_report_media"("media_asset_id");
+CREATE UNIQUE INDEX "spending_report_media_report_id_position_key" ON "spending_report_media"("report_id", "position");
+CREATE INDEX "users_kyc_status_idx" ON "users"("kyc_status");
+CREATE INDEX "media_assets_uploader_id_created_at_idx" ON "media_assets"("uploader_id", "created_at");
+CREATE INDEX "campaigns_creator_id_status_idx" ON "campaigns"("creator_id", "status");
+
+ALTER TABLE "auth_sessions" ADD CONSTRAINT "auth_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "identity_verifications" ADD CONSTRAINT "identity_verifications_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "identity_documents" ADD CONSTRAINT "identity_documents_verification_id_fkey" FOREIGN KEY ("verification_id") REFERENCES "identity_verifications"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "identity_documents" ADD CONSTRAINT "identity_documents_media_asset_id_fkey" FOREIGN KEY ("media_asset_id") REFERENCES "media_assets"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "campaigns" ADD CONSTRAINT "campaigns_creator_id_fkey" FOREIGN KEY ("creator_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "campaigns" ADD CONSTRAINT "campaigns_coordinator_id_fkey" FOREIGN KEY ("coordinator_id") REFERENCES "coordinator_profiles"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "campaign_media" ADD CONSTRAINT "campaign_media_campaign_id_fkey" FOREIGN KEY ("campaign_id") REFERENCES "campaigns"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "campaign_media" ADD CONSTRAINT "campaign_media_media_asset_id_fkey" FOREIGN KEY ("media_asset_id") REFERENCES "media_assets"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "spending_reports" ADD CONSTRAINT "spending_reports_campaign_id_fkey" FOREIGN KEY ("campaign_id") REFERENCES "campaigns"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "spending_reports" ADD CONSTRAINT "spending_reports_milestone_id_fkey" FOREIGN KEY ("milestone_id") REFERENCES "milestones"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "spending_reports" ADD CONSTRAINT "spending_reports_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "spending_report_media" ADD CONSTRAINT "spending_report_media_report_id_fkey" FOREIGN KEY ("report_id") REFERENCES "spending_reports"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "spending_report_media" ADD CONSTRAINT "spending_report_media_media_asset_id_fkey" FOREIGN KEY ("media_asset_id") REFERENCES "media_assets"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- ---------------------------------------------------------------------------------------------
+-- 4. Guarantees Prisma cannot express
+-- ---------------------------------------------------------------------------------------------
+
+-- 4.1 KYC front gate on campaigns (also: the creator of a campaign never changes).
+-- FOR SHARE locks the creator's row until this transaction ends, so a concurrent revocation
+-- cannot slip between the check and the insert.
+CREATE OR REPLACE FUNCTION abotkamay_assert_campaign_creator_verified() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_kyc     kyc_status;
+  v_expires TIMESTAMPTZ;
+  v_account account_status;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.creator_id IS DISTINCT FROM OLD.creator_id THEN
+    RAISE EXCEPTION 'AbotKamay: the creator of campaign % cannot be changed', OLD.id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF TG_OP = 'INSERT' OR (NEW.status = 'ACTIVE' AND OLD.status IS DISTINCT FROM 'ACTIVE') THEN
+    SELECT u.kyc_status, u.kyc_expires_at, u.status
+      INTO v_kyc, v_expires, v_account
+      FROM "users" u
+     WHERE u.id = NEW.creator_id
+       FOR SHARE;
+
+    IF v_kyc IS DISTINCT FROM 'VERIFIED'
+       OR (v_expires IS NOT NULL AND v_expires <= now())
+       OR v_account IS DISTINCT FROM 'ACTIVE' THEN
+      RAISE EXCEPTION 'AbotKamay: creator % is not KYC-verified (kyc_status=%, account=%). Only verified users can post or publish campaigns.',
+        NEW.creator_id, COALESCE(v_kyc::text, 'unknown'), COALESCE(v_account::text, 'unknown')
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER campaigns_creator_kyc_gate
+  BEFORE INSERT OR UPDATE ON "campaigns"
+  FOR EACH ROW EXECUTE FUNCTION abotkamay_assert_campaign_creator_verified();
+
+-- 4.2 Creator payouts: only to the campaign's own creator, only while verified. Cancelling or
+-- failing a payout stays possible after a revocation; approving or paying it does not.
+CREATE OR REPLACE FUNCTION abotkamay_assert_creator_payout() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_creator UUID;
+  v_kyc     kyc_status;
+  v_expires TIMESTAMPTZ;
+  v_account account_status;
+BEGIN
+  IF NEW.method::text <> 'CREATOR_PAYOUT' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE'
+     AND NOT (NEW.status::text IN ('APPROVED_L1', 'APPROVED', 'PROCESSING', 'PAID')
+              AND NEW.status IS DISTINCT FROM OLD.status)
+     AND NEW.payee_id IS NOT DISTINCT FROM OLD.payee_id
+     AND NEW.payee_type IS NOT DISTINCT FROM OLD.payee_type THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT c.creator_id INTO v_creator FROM "campaigns" c WHERE c.id = NEW.campaign_id;
+  IF NEW.payee_type <> 'CREATOR' OR NEW.payee_id IS DISTINCT FROM v_creator THEN
+    RAISE EXCEPTION 'AbotKamay: creator payouts can only go to the campaign''s own creator (disbursement %)', NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  SELECT u.kyc_status, u.kyc_expires_at, u.status
+    INTO v_kyc, v_expires, v_account
+    FROM "users" u
+   WHERE u.id = v_creator
+     FOR SHARE;
+
+  IF v_kyc IS DISTINCT FROM 'VERIFIED'
+     OR (v_expires IS NOT NULL AND v_expires <= now())
+     OR v_account IS DISTINCT FROM 'ACTIVE' THEN
+    RAISE EXCEPTION 'AbotKamay: payee % is not KYC-verified (kyc_status=%). Payouts need a verified creator.',
+      v_creator, COALESCE(v_kyc::text, 'unknown')
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER disbursements_creator_payout_gate
+  BEFORE INSERT OR UPDATE ON "disbursements"
+  FOR EACH ROW EXECUTE FUNCTION abotkamay_assert_creator_payout();
+
+-- 4.3 Funding type and goal agree. campaigns_goal_positive (goal_minor > 0) still applies to FIXED.
+ALTER TABLE "campaigns"
+  ADD CONSTRAINT campaigns_goal_matches_funding_type
+  CHECK ((funding_type = 'FIXED') = (goal_minor IS NOT NULL));
+
+-- 4.4 Spending reports: written by the creator, facts immutable, never deleted, hash-chained.
+CREATE OR REPLACE FUNCTION abotkamay_guard_spending_report() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_creator UUID;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'AbotKamay: spending_reports is append-only (DELETE rejected). Post a new report instead.'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    SELECT c.creator_id INTO v_creator FROM "campaigns" c WHERE c.id = NEW.campaign_id;
+    IF NEW.author_id IS DISTINCT FROM v_creator THEN
+      RAISE EXCEPTION 'AbotKamay: only the campaign''s creator can post its spending reports'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF (NEW.id, NEW.campaign_id, NEW.milestone_id, NEW.author_id, NEW.title, NEW.note, NEW.amount_minor,
+      NEW.currency, NEW.spent_on, NEW.merchant_name, NEW.prev_hash, NEW.hash, NEW.created_at)
+     IS DISTINCT FROM
+     (OLD.id, OLD.campaign_id, OLD.milestone_id, OLD.author_id, OLD.title, OLD.note, OLD.amount_minor,
+      OLD.currency, OLD.spent_on, OLD.merchant_name, OLD.prev_hash, OLD.hash, OLD.created_at) THEN
+    RAISE EXCEPTION 'AbotKamay: the facts in spending report % are immutable (only the review can change)', OLD.id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER spending_reports_immutable
+  BEFORE INSERT OR UPDATE OR DELETE ON "spending_reports"
+  FOR EACH ROW EXECUTE FUNCTION abotkamay_guard_spending_report();
+CREATE TRIGGER spending_reports_no_truncate
+  BEFORE TRUNCATE ON "spending_reports"
+  FOR EACH STATEMENT EXECUTE FUNCTION abotkamay_forbid_mutation();
+
+CREATE TRIGGER spending_report_media_append_only
+  BEFORE UPDATE OR DELETE ON "spending_report_media"
+  FOR EACH ROW EXECUTE FUNCTION abotkamay_forbid_mutation();
+CREATE TRIGGER spending_report_media_no_truncate
+  BEFORE TRUNCATE ON "spending_report_media"
+  FOR EACH STATEMENT EXECUTE FUNCTION abotkamay_forbid_mutation();
+
+ALTER TABLE "spending_reports"
+  ADD CONSTRAINT spending_reports_amount_positive CHECK (amount_minor > 0),
+  ADD CONSTRAINT spending_reports_currency_iso CHECK (currency ~ '^[A-Z]{3}$'),
+  ADD CONSTRAINT spending_reports_hash_format CHECK (hash ~ '^[0-9a-f]{64}$'),
+  ADD CONSTRAINT spending_reports_prev_hash_format CHECK (prev_hash = 'GENESIS' OR prev_hash ~ '^[0-9a-f]{64}$'),
+  ADD CONSTRAINT spending_reports_no_self_link CHECK (prev_hash <> hash);
+
+ALTER TABLE "spending_report_media"
+  ADD CONSTRAINT spending_report_media_position_range CHECK (position BETWEEN 1 AND 10);
+
+ALTER TABLE "campaign_media"
+  ADD CONSTRAINT campaign_media_position_range CHECK (position BETWEEN 1 AND 10);
+
+-- 4.5 Identity checks and sign-in.
+CREATE UNIQUE INDEX identity_verifications_one_submitted_per_user
+  ON "identity_verifications" (user_id)
+  WHERE status = 'SUBMITTED';
+
+ALTER TABLE "identity_verifications"
+  ADD CONSTRAINT identity_verifications_reviewer_not_applicant
+    CHECK (reviewer_id IS NULL OR reviewer_id <> user_id),
+  ADD CONSTRAINT identity_verifications_decision_recorded
+    CHECK (status NOT IN ('APPROVED', 'REJECTED') OR decided_at IS NOT NULL),
+  ADD CONSTRAINT identity_verifications_manual_approval_has_reviewer
+    CHECK (status <> 'APPROVED' OR provider <> 'MANUAL_REVIEW' OR reviewer_id IS NOT NULL),
+  ADD CONSTRAINT identity_verifications_rejection_has_reason
+    CHECK (status <> 'REJECTED' OR rejection_reason IS NOT NULL);
+
+ALTER TABLE "users"
+  ADD CONSTRAINT users_verified_has_timestamp
+    CHECK (kyc_status::text <> 'VERIFIED' OR kyc_verified_at IS NOT NULL);
+
+ALTER TABLE "otp_challenges"
+  ADD CONSTRAINT otp_challenges_attempts_range CHECK (attempts BETWEEN 0 AND 5);

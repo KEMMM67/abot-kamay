@@ -1,0 +1,143 @@
+# render.yaml: Render Blueprint for the AbotKamay backend (https://render.com/docs/blueprint-spec)
+#
+#   abotkamay-api            web service: NestJS 12 + Fastify API (apps/api), Docker
+#   abotkamay-media-worker   background worker, same image: makes the public copies of moderated photos
+#                            and videos (GPS stripped, H.264 MP4, posters). Without it no post media
+#                            ever reaches the feed.
+#
+# Singapore, next to Neon (ap-southeast-1) and closest to donors in the Philippines. The web app
+# deploys to Vercel (apps/web/vercel.json).
+#
+# Deploys wait for GitHub CI (autoDeployTrigger: checksPass). Database migrations are applied by CI's
+# approval-gated migrate-neon job, and /api/v1/health/ready fails while any migration shipped in the
+# image is missing, so a new deploy never takes traffic on an unmigrated database.
+#
+# Secrets are `sync: false`: Render asks for them once, when the Blueprint is first applied; they are
+# never written to this file. The worker copies the API's values (fromService + envVarKey), so each
+# secret is entered once. Every variable is explained in DEPLOYMENT.md.
+
+envVarGroups:
+  - name: abotkamay-backend
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_NAME
+        value: AbotKamay
+      # Cloudflare R2. For AWS S3: ap-southeast-1 and "false", and leave MEDIA_S3_ENDPOINT empty.
+      - key: MEDIA_S3_REGION
+        value: auto
+      - key: MEDIA_S3_FORCE_PATH_STYLE
+        value: 'true'
+      # Sign-in answers 503 until an SMS gateway adapter exists ("log" is refused in production).
+      - key: SMS_PROVIDER
+        value: none
+      - key: AI_SCREENING_ENABLED
+        value: 'true'
+      # Any model your Anthropic account can call. A failing call only routes the case to humans.
+      - key: AI_MODEL
+        value: claude-opus-5-5
+
+services:
+  - type: web
+    name: abotkamay-api
+    runtime: docker
+    region: singapore
+    plan: 1c-2g
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health/ready
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - apps/api/**
+        - package.json
+        - package-lock.json
+        - render.yaml
+      ignoredPaths:
+        - apps/api/test/**
+        - apps/api/**/*.spec.ts
+    envVars:
+      - fromGroup: abotkamay-backend
+      # Neon POOLED connection string (host contains -pooler), with ?sslmode=require.
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_MAX
+        value: '10'
+      # Keys the one-time-code and KYC-challenge HMACs. Generated once; changing it signs everyone out.
+      - key: AUTH_SECRET
+        generateValue: true
+      # The web app's server (Vercel) proves with it that the visitor IP it reports is real. Copy the
+      # generated value into Vercel's FORWARDED_IP_SECRET.
+      - key: FORWARDED_IP_SECRET
+        generateValue: true
+      # The web app's origins, comma-separated: https://abotkamay.ph,https://www.abotkamay.ph
+      - key: CORS_ORIGINS
+        sync: false
+      # Object storage. R2: https://<ACCOUNT_ID>.r2.cloudflarestorage.com, with an R2 API token's keys.
+      - key: MEDIA_S3_ENDPOINT
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: MEDIA_QUARANTINE_BUCKET
+        sync: false
+      - key: MEDIA_RESTRICTED_BUCKET
+        sync: false
+      # The CDN (custom domain) in front of the public bucket, e.g. https://media.abotkamay.ph
+      - key: MEDIA_PUBLIC_BASE_URL
+        sync: false
+      # Payment gateways: each webhook route answers 404 until its secret is set.
+      - key: PAYMONGO_WEBHOOK_SECRET
+        sync: false
+      - key: XENDIT_CALLBACK_TOKEN
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      # Optional: without it every submission goes to human review.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+  - type: worker
+    name: abotkamay-media-worker
+    runtime: docker
+    region: singapore
+    # One file at a time. Video re-encoding is CPU-bound: 2c-4g roughly halves the wait per video.
+    plan: 1c-2g
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    dockerCommand: node dist/worker.js
+    autoDeployTrigger: checksPass
+    # Lets the file in progress finish on deploys; an interrupted one is retried later anyway.
+    maxShutdownDelaySeconds: 300
+    buildFilter:
+      paths:
+        - apps/api/**
+        - package.json
+        - package-lock.json
+        - render.yaml
+      ignoredPaths:
+        - apps/api/test/**
+        - apps/api/**/*.spec.ts
+    envVars:
+      - fromGroup: abotkamay-backend
+      - key: DATABASE_URL
+        fromService: { name: abotkamay-api, type: web, envVarKey: DATABASE_URL }
+      - key: DATABASE_POOL_MAX
+        value: '3'
+      - key: MEDIA_S3_ENDPOINT
+        fromService: { name: abotkamay-api, type: web, envVarKey: MEDIA_S3_ENDPOINT }
+      - key: AWS_ACCESS_KEY_ID
+        fromService: { name: abotkamay-api, type: web, envVarKey: AWS_ACCESS_KEY_ID }
+      - key: AWS_SECRET_ACCESS_KEY
+        fromService: { name: abotkamay-api, type: web, envVarKey: AWS_SECRET_ACCESS_KEY }
+      - key: MEDIA_QUARANTINE_BUCKET
+        fromService: { name: abotkamay-api, type: web, envVarKey: MEDIA_QUARANTINE_BUCKET }
+      - key: MEDIA_RESTRICTED_BUCKET
+        fromService: { name: abotkamay-api, type: web, envVarKey: MEDIA_RESTRICTED_BUCKET }
+      # The bucket behind MEDIA_PUBLIC_BASE_URL. Only the worker writes to it.
+      - key: MEDIA_PUBLIC_BUCKET
+        sync: false

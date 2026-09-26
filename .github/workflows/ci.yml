@@ -1,0 +1,291 @@
+# .github/workflows/ci.yml
+#
+# AbotKamay CI
+#   api          build the Node app, apply migrations to a real PostgreSQL + pgvector, detect drift,
+#                guard the ledger guarantees, run unit + integration tests, build
+#   api-image    build the Docker image Render deploys and smoke-test the media worker's toolchain in it
+#   web          lint, typecheck and build the Next.js app the way Vercel does
+#   qa-suite     compile the Java/Selenium suite and validate the AI-generated scenario catalog
+#   e2e          Selenium smoke scenarios on Selenium Grid (runs once vars.E2E_BASE_URL is configured)
+#   migrate-neon apply migrations to Neon on main (opt-in, approval-gated GitHub environment)
+#
+# Every third-party action is pinned to a full commit SHA (tags can be moved by an attacker).
+# Dependabot (.github/dependabot.yml) keeps the pins and dependencies up to date.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  api:
+    name: API · build, migrate, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Match the major version of your Neon project (Neon default: 17).
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: abotkamay
+          POSTGRES_PASSWORD: abotkamay
+          POSTGRES_DB: abotkamay_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U abotkamay -d abotkamay_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://abotkamay:abotkamay@localhost:5432/abotkamay_ci?sslmode=disable
+      DIRECT_DATABASE_URL: postgresql://abotkamay:abotkamay@localhost:5432/abotkamay_ci?sslmode=disable
+      DATABASE_POOL_MAX: '5'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js (version from .nvmrc)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies (postinstall runs prisma generate)
+        run: npm ci
+
+      - name: Dependency audit (high and critical)
+        run: npm audit --audit-level=high
+
+      - name: Lint (oxlint)
+        run: npm run lint
+
+      - name: Format check (prettier)
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests with coverage
+        run: npm run test:cov -w @abotkamay/api
+
+      - name: Validate Prisma schema
+        run: npm run db:validate
+
+      - name: Apply migrations to the CI database
+        run: npm run db:migrate:deploy
+
+      - name: Detect drift between schema.prisma and the migrated database
+        working-directory: apps/api
+        run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+
+      - name: Guard the ledger and trust guarantees
+        run: |
+          pattern='DROP (TRIGGER|FUNCTION|INDEX|CONSTRAINT).*(abotkamay_|append_only|no_truncate|must_balance|embedding_hnsw|one_open_per_beneficiary|four_eyes|maker_checker|kyc_gate|payout_gate|immutable|goal_matches_funding_type|goal_positive|one_submitted_per_user|reviewer_not_applicant|verified_has_timestamp)'
+          if grep -RInE "$pattern" apps/api/prisma/migrations; then
+            echo "::error::A migration drops a protected database guarantee (see prisma/migrations/20260925000100_ledger_guarantees and 20260925000200_creator_posts_kyc)."
+            exit 1
+          fi
+
+      - name: Integration tests (real PostgreSQL + pgvector)
+        run: npm run test:integration
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: api-coverage
+          path: apps/api/coverage
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload build output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: api-dist
+          path: apps/api/dist
+          retention-days: 7
+
+  api-image:
+    name: API image · build + media smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the image Render deploys (API and media worker)
+        run: docker build -f apps/api/Dockerfile -t abotkamay-api:ci .
+
+      - name: Media toolchain works inside the image (ffmpeg, heif-convert, sharp, no GPS left)
+        run: docker run --rm -i abotkamay-api:ci node --input-type=module - < apps/api/scripts/smoke-media.mjs
+
+      - name: The media worker refuses to start without its buckets
+        run: |
+          if docker run --rm -e DATABASE_URL=postgresql://u:p@127.0.0.1:5432/db abotkamay-api:ci node dist/worker.js; then
+            echo "::error::The worker started without MEDIA_QUARANTINE_BUCKET and MEDIA_PUBLIC_BUCKET"
+            exit 1
+          fi
+
+  web:
+    name: Web · lint, typecheck, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      # No API during CI: the feed and home page render their "can't load" notice at build time,
+      # exactly as a Vercel build does when the API is unreachable.
+      NEXT_PUBLIC_API_BASE_URL: https://api.invalid/api/v1
+      NEXT_PUBLIC_SITE_URL: https://abotkamay.invalid
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js (version from .nvmrc)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install the web app's dependencies (as Vercel does)
+        run: npm ci --workspace @abotkamay/web
+
+      - name: Lint (oxlint)
+        run: npm run lint:web
+
+      - name: Format check (prettier)
+        run: npm run format:check:web
+
+      - name: Typecheck (route types + tsc)
+        run: npm run typecheck:web
+
+      - name: Production build
+        run: npm run build:web
+
+  qa-suite:
+    name: QA suite · compile + scenario catalog gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: qa/e2e-selenium
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Compile and run browser-free checks (scenario catalog validation)
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B -ntp test
+
+  e2e:
+    name: E2E · Selenium Grid smoke
+    needs: [api, qa-suite]
+    # Runs once a deployed preview/staging environment exists: set repository variables
+    # E2E_BASE_URL and E2E_API_URL, and the secret E2E_SEED_TOKEN.
+    if: ${{ vars.E2E_BASE_URL != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: qa/e2e-selenium
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Start Selenium Grid
+        run: docker compose -f docker-compose.grid.yml up -d --wait
+
+      - name: Run approved scenarios against the deployed environment
+        env:
+          E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
+          E2E_API_URL: ${{ vars.E2E_API_URL }}
+          E2E_SEED_TOKEN: ${{ secrets.E2E_SEED_TOKEN }}
+          E2E_GRID_URL: http://localhost:4444
+          SCENARIO_TAGS: ${{ vars.E2E_SCENARIO_TAGS || 'smoke' }}
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B -ntp verify -Pe2e "-Dscenario.tags=${SCENARIO_TAGS}"
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: allure-results
+          path: qa/e2e-selenium/target/allure-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Stop Selenium Grid
+        if: always()
+        run: docker compose -f docker-compose.grid.yml down
+
+  migrate-neon:
+    name: Deploy migrations · Neon
+    # After the image builds too: a schema change never lands for code that can't deploy.
+    needs: [api, api-image, qa-suite]
+    # Opt-in: set repository variable NEON_MIGRATIONS_ENABLED=true and add required reviewers to the
+    # "production" environment (Settings > Environments) so every schema change is approved by a person.
+    # Render deploys the API only after every check passes (render.yaml: autoDeployTrigger: checksPass),
+    # and /api/v1/health/ready keeps a deploy out of rotation until these migrations are applied.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.NEON_MIGRATIONS_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+    concurrency:
+      group: neon-migrations-production
+      cancel-in-progress: false
+    env:
+      # Neon: migrations use the DIRECT (non-pooled) connection string.
+      DIRECT_DATABASE_URL: ${{ secrets.NEON_DIRECT_DATABASE_URL }}
+      DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js (version from .nvmrc)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Show pending migrations
+        run: npm run db:migrate:status || true
+
+      - name: Apply pending migrations
+        run: npm run db:migrate:deploy
+
+      - name: Verify no drift after deploy
+        working-directory: apps/api
+        run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code

@@ -1,0 +1,12 @@
+<!-- brand/abotkamay-app-icon.svg: app icon / favicon source (export 512, 192, 180, 32, 16 px PNGs) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="ak-icon-title">
+  <title id="ak-icon-title">AbotKamay</title>
+  <rect width="512" height="512" rx="112" fill="#FFF8EC"/>
+  <g transform="translate(64 64) scale(3)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="14">
+      <path d="M64 108 C40 92 16 74 16 52 C16 36 26 24 40 24 C50 24 56 29 58 36" stroke="#0E7C6B"/>
+      <path d="M64 108 C88 92 112 74 112 52 C112 36 102 24 88 24 C78 24 72 29 70 36" stroke="#E0603A"/>
+    </g>
+    <circle cx="64" cy="63" r="12" fill="#F2B632"/>
+  </g>
+</svg>

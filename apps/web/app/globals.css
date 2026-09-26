@@ -1,0 +1,348 @@
+/* apps/web/app/globals.css
+ *
+ * Tailwind CSS v4 entry point. The brand tokens (colors, font, shadows, keyframes, animations) live in
+ * tailwind.config.ts and are loaded with @config. This file holds the base layer, the dialog styles,
+ * AbotKamay's custom animation utilities, and the page-transition styles.
+ *
+ * A JS config does not emit --color-* CSS variables (Tailwind inlines the values into utilities), so
+ * custom CSS here reads brand colors with theme(colors.teal.600), never var(--color-teal-600).
+ *
+ * Motion rules: animation is decoration, content reads fine without it, and it stops for anyone who
+ * turns on "reduce motion" in their OS (WCAG 2.3.3). Entrance animations are pure CSS so pages never
+ * depend on JavaScript to become visible, even in slow in-app browsers.
+ */
+@import 'tailwindcss';
+@config '../tailwind.config.ts';
+
+/* ------------------------------------------------------------------------------------------------ Base */
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    /* In-page anchors (#how-it-works) land below the sticky header. */
+    scroll-padding-top: 6rem;
+    /* Scroll locking (dialog, mobile menu) must not shift the layout. */
+    scrollbar-gutter: stable;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+
+  /* Scroll lock without JavaScript: an open dialog or the open mobile menu. */
+  html:has(dialog[open]),
+  html:has([data-scroll-lock]) {
+    overflow: hidden;
+  }
+
+  body {
+    @apply bg-cream font-sans text-ink antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    text-wrap: balance;
+  }
+
+  p,
+  li,
+  dd,
+  blockquote {
+    text-wrap: pretty;
+  }
+
+  a {
+    text-underline-offset: 0.2em;
+  }
+
+  :focus-visible {
+    outline: 3px solid theme(colors.teal.600);
+    outline-offset: 3px;
+  }
+
+  /* Teal has too little contrast on Ink, so dark panels get a gold focus ring. */
+  .surface-dark :focus-visible {
+    outline-color: theme(colors.gold.300);
+  }
+
+  ::selection {
+    background-color: theme(colors.gold.200);
+    color: theme(colors.ink.DEFAULT);
+  }
+
+  /* On phones the campaign page's Donate button is a fixed bar; keep the footer clear of it. */
+  body:has([data-sticky-cta]) {
+    padding-bottom: 6.5rem;
+  }
+
+  @media (width >= 64rem) {
+    body:has([data-sticky-cta]) {
+      padding-bottom: 0;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------------------------------ Components */
+@layer components {
+  /* Native <dialog> opened with showModal(): focus trap, Escape and an inert page come for free.
+     A bottom sheet on phones, a centered card from 40rem up. Enter and exit are CSS transitions
+     (@starting-style + allow-discrete); browsers without support simply show and hide it. */
+  .ak-dialog {
+    position: fixed;
+    inset: auto 0 0;
+    width: 100%;
+    max-width: 100%;
+    /* Absolute units only: the inner wrapper inherits this value to size its scroll area, and a
+       percentage would not resolve there (it would turn into "none" and clip the Pay button). */
+    max-height: 92vh;
+    max-height: 92dvh;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 1.75rem 1.75rem 0 0;
+    background-color: #fff;
+    color: theme(colors.ink.DEFAULT);
+    box-shadow: 0 -12px 40px -12px rgb(11 43 38 / 0.35);
+    overflow: hidden;
+    opacity: 0;
+    transform: translateY(100%);
+    transition:
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 220ms ease-out,
+      overlay 420ms allow-discrete,
+      display 420ms allow-discrete;
+  }
+
+  .ak-dialog[open] {
+    opacity: 1;
+    transform: none;
+  }
+
+  @starting-style {
+    .ak-dialog[open] {
+      opacity: 0;
+      transform: translateY(100%);
+    }
+  }
+
+  .ak-dialog::backdrop {
+    background-color: rgb(11 43 38 / 0);
+    transition:
+      background-color 300ms ease-out,
+      overlay 300ms allow-discrete,
+      display 300ms allow-discrete;
+  }
+
+  .ak-dialog[open]::backdrop {
+    background-color: rgb(11 43 38 / 0.55);
+  }
+
+  @starting-style {
+    .ak-dialog[open]::backdrop {
+      background-color: rgb(11 43 38 / 0);
+    }
+  }
+
+  @media (width >= 40rem) {
+    .ak-dialog {
+      inset: 0;
+      margin: auto;
+      width: min(34rem, calc(100% - 3rem));
+      max-height: min(88dvh, 54rem);
+      border-radius: 1.75rem;
+      box-shadow: 0 30px 80px -20px rgb(11 43 38 / 0.45);
+      transform: translateY(16px) scale(0.97);
+    }
+
+    @starting-style {
+      .ak-dialog[open] {
+        transform: translateY(16px) scale(0.97);
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------------ Custom animation utilities */
+
+/* Page container: 16px gutters on phones, wider from tablets up. */
+@utility container-page {
+  margin-inline: auto;
+  width: 100%;
+  max-width: 76rem;
+  padding-inline: 1rem;
+
+  @media (width >= 40rem) {
+    padding-inline: 1.5rem;
+  }
+
+  @media (width >= 64rem) {
+    padding-inline: 2rem;
+  }
+}
+
+/* Staggered entrances: put the item's index in --i, e.g. style={{ '--i': index }}. */
+@utility stagger {
+  animation-delay: calc(var(--i, 0) * var(--stagger-step, 70ms) + var(--stagger-offset, 0ms));
+}
+
+/* animation-delay-150 -> 150ms. Tailwind has no animation-delay utilities of its own. */
+@utility animation-delay-* {
+  animation-delay: calc(--value(integer) * 1ms);
+}
+
+/* Scroll-driven reveal, no JavaScript: content rises in as it enters the viewport. Browsers without
+   scroll-driven animations, reduced-motion users and print just see the content. Keep it off pages the
+   E2E suite inspects: content below the fold stays transparent until scrolled to. */
+@utility reveal {
+  @supports (animation-timeline: view()) {
+    @media screen and (prefers-reduced-motion: no-preference) {
+      animation: ak-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 5% entry 85%;
+    }
+  }
+}
+
+/* Press feedback for buttons and tappable tiles. */
+@utility pressable {
+  transition-property: color, background-color, border-color, box-shadow, translate, scale;
+  transition-duration: 200ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+
+  &:active:not(:disabled) {
+    scale: 0.97;
+  }
+}
+
+/* Loading placeholder. Pair it with animate-shimmer. */
+@utility skeleton {
+  background-image: linear-gradient(
+    90deg,
+    theme(colors.ink.100) 0%,
+    theme(colors.ink.50) 50%,
+    theme(colors.ink.100) 100%
+  );
+  background-size: 200% 100%;
+}
+
+/* Scroll shadows, CSS only: a soft shade appears at the top or bottom edge of a scroll area only while
+   there is more content that way, so people can tell the form continues. For white surfaces. */
+@utility scroll-shadows {
+  background:
+    linear-gradient(#fff 30%, rgb(255 255 255 / 0)) center top,
+    linear-gradient(rgb(255 255 255 / 0), #fff 70%) center bottom,
+    radial-gradient(farthest-side at 50% 0, rgb(11 43 38 / 0.14), transparent) center top,
+    radial-gradient(farthest-side at 50% 100%, rgb(11 43 38 / 0.14), transparent) center bottom;
+  background-repeat: no-repeat;
+  background-size:
+    100% 40px,
+    100% 40px,
+    100% 14px,
+    100% 14px;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* Soft dot texture for the illustrated campaign panels. */
+@utility dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgb(11 43 38 / 0.1) 1px, transparent 0);
+  background-size: 18px 18px;
+}
+
+@keyframes ak-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---------------------------------------------------------------------------------- Page transitions
+   React <ViewTransition> (components/page-transition.tsx) drives the browser's View Transitions API.
+   Browsers without it navigate instantly. The header keeps still so the page has an anchor. */
+::view-transition {
+  pointer-events: none;
+}
+
+::view-transition-old(.page-exit) {
+  animation: 160ms ease-in both ak-vt-fade-out;
+}
+
+::view-transition-new(.page-enter) {
+  animation: 340ms cubic-bezier(0.16, 1, 0.3, 1) 80ms both ak-vt-rise;
+}
+
+::view-transition-group(site-header) {
+  animation: none;
+  z-index: 100;
+}
+
+::view-transition-old(site-header) {
+  display: none;
+}
+
+::view-transition-new(site-header) {
+  animation: none;
+}
+
+/* Shared element: a campaign card's picture panel becomes the campaign page header. */
+::view-transition-group(.morph) {
+  animation-duration: 460ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::view-transition-image-pair(.morph) {
+  animation-name: ak-vt-via-blur;
+}
+
+@keyframes ak-vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ak-vt-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+@keyframes ak-vt-via-blur {
+  30% {
+    filter: blur(3px);
+  }
+}
+
+/* -------------------------------------------------------------------------------------- Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+}

@@ -1,0 +1,12 @@
+<!-- brand/abotkamay-mark.svg: AbotKamay symbol (two reaching hands form a heart around the person they help) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="ak-mark-title">
+  <title id="ak-mark-title">AbotKamay</title>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="14">
+    <!-- left hand: Bayanihan Teal -->
+    <path d="M64 108 C40 92 16 74 16 52 C16 36 26 24 40 24 C50 24 56 29 58 36" stroke="#0E7C6B"/>
+    <!-- right hand: Kalinga Coral -->
+    <path d="M64 108 C88 92 112 74 112 52 C112 36 102 24 88 24 C78 24 72 29 70 36" stroke="#E0603A"/>
+  </g>
+  <!-- the person being helped, held within reach: Sunrise Gold -->
+  <circle cx="64" cy="63" r="12" fill="#F2B632"/>
+</svg>

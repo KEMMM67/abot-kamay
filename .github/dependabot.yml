@@ -1,0 +1,31 @@
+# .github/dependabot.yml: keeps pinned action SHAs, npm and Maven dependencies current
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      nestjs:
+        patterns: ['@nestjs/*']
+      prisma:
+        patterns: ['prisma', '@prisma/*']
+      tooling:
+        dependency-type: development
+
+  - package-ecosystem: maven
+    directory: /qa/e2e-selenium
+    schedule:
+      interval: weekly
+    groups:
+      qa:
+        patterns: ['*']

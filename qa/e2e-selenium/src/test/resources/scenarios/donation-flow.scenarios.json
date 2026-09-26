@@ -1,0 +1,104 @@
+{
+  "catalog": "donation-flow",
+  "version": 1,
+  "generatedBy": {
+    "tool": "Claude API via qa/e2e-selenium/ai/generate-scenarios.prompt.md",
+    "model": "claude-opus-5",
+    "promptVersion": "scenario-gen.v1",
+    "generatedAt": "2026-09-25"
+  },
+  "sourceRequirements": [
+    "AK-DON-001 Donors can give with GCash, Maya or card without creating an account",
+    "AK-DON-002 Minimum donation is PHP 20.00; amounts must be whole pesos or pesos with centavos",
+    "AK-DON-003 Fees and the exact amount reaching the campaign are shown before payment",
+    "AK-DON-004 Donors may give anonymously; the public ledger then shows 'Anonymous'",
+    "AK-DON-005 A failed payment shows a clear message and records nothing in the ledger",
+    "AK-LED-003 Every successful donation appears in the public ledger with a verifiable hash"
+  ],
+  "scenarios": [
+    {
+      "id": "DON-001",
+      "title": "Guest donates PHP 500 with GCash and sees it in the public ledger",
+      "requirementIds": ["AK-DON-001", "AK-DON-003", "AK-LED-003"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": null },
+      "tags": ["smoke", "payments", "ledger"],
+      "riskLevel": "CRITICAL",
+      "input": { "amount": "500", "paymentMethod": "GCASH", "anonymous": false },
+      "sandboxOutcome": "AUTHORIZE",
+      "expected": { "outcome": "RECEIPT", "ledgerAmountMinor": "50000", "ledgerDonorLabel": null, "messageContains": null }
+    },
+    {
+      "id": "DON-002",
+      "title": "Anonymous Maya donation appears as 'Anonymous' in the public ledger",
+      "requirementIds": ["AK-DON-001", "AK-DON-004", "AK-LED-003"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": null },
+      "tags": ["payments", "ledger", "privacy"],
+      "riskLevel": "HIGH",
+      "input": { "amount": "1250.50", "paymentMethod": "MAYA", "anonymous": true },
+      "sandboxOutcome": "AUTHORIZE",
+      "expected": { "outcome": "RECEIPT", "ledgerAmountMinor": "125050", "ledgerDonorLabel": "Anonymous", "messageContains": null }
+    },
+    {
+      "id": "DON-003",
+      "title": "Declined card payment shows a clear message and records nothing",
+      "requirementIds": ["AK-DON-005"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": "Kept the message check loose so copy edits do not break the test." },
+      "tags": ["smoke", "payments", "negative"],
+      "riskLevel": "HIGH",
+      "input": { "amount": "300", "paymentMethod": "CARD", "anonymous": false },
+      "sandboxOutcome": "FAIL",
+      "expected": { "outcome": "DECLINED", "ledgerAmountMinor": null, "ledgerDonorLabel": null, "messageContains": "tinanggihan" }
+    },
+    {
+      "id": "DON-004",
+      "title": "Amount below the PHP 20 minimum is blocked before checkout (card-testing defense)",
+      "requirementIds": ["AK-DON-002"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": null },
+      "tags": ["validation", "negative", "abuse"],
+      "riskLevel": "MEDIUM",
+      "input": { "amount": "19.99", "paymentMethod": "CARD", "anonymous": false },
+      "sandboxOutcome": "NOT_REACHED",
+      "expected": { "outcome": "VALIDATION_ERROR", "ledgerAmountMinor": null, "ledgerDonorLabel": null, "messageContains": "pinakamababa" }
+    },
+    {
+      "id": "DON-005",
+      "title": "Exactly PHP 20.00 (boundary) is accepted",
+      "requirementIds": ["AK-DON-002", "AK-LED-003"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": null },
+      "tags": ["validation", "boundary", "payments"],
+      "riskLevel": "MEDIUM",
+      "input": { "amount": "20.00", "paymentMethod": "GCASH", "anonymous": false },
+      "sandboxOutcome": "AUTHORIZE",
+      "expected": { "outcome": "RECEIPT", "ledgerAmountMinor": "2000", "ledgerDonorLabel": null, "messageContains": null }
+    },
+    {
+      "id": "DON-006",
+      "title": "Scientific-notation input (1e3) is rejected instead of silently becoming PHP 1,000",
+      "requirementIds": ["AK-DON-002"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "APPROVED", "reviewedBy": "qa-lead", "reviewedAt": "2026-09-25", "notes": "Good catch by the generator: number inputs accept 'e' in most browsers." },
+      "tags": ["validation", "negative"],
+      "riskLevel": "MEDIUM",
+      "input": { "amount": "1e3", "paymentMethod": "GCASH", "anonymous": false },
+      "sandboxOutcome": "NOT_REACHED",
+      "expected": { "outcome": "VALIDATION_ERROR", "ledgerAmountMinor": null, "ledgerDonorLabel": null, "messageContains": "tamang halaga" }
+    },
+    {
+      "id": "DON-007",
+      "title": "Double-clicking Donate creates exactly one donation (idempotency key reused)",
+      "requirementIds": ["AK-DON-001", "AK-LED-003"],
+      "origin": "AI_GENERATED",
+      "review": { "status": "PENDING_REVIEW", "reviewedBy": null, "reviewedAt": null, "notes": "Needs a page-object action for rapid double click before approval." },
+      "tags": ["payments", "concurrency", "abuse"],
+      "riskLevel": "CRITICAL",
+      "input": { "amount": "750", "paymentMethod": "CARD", "anonymous": false },
+      "sandboxOutcome": "AUTHORIZE",
+      "expected": { "outcome": "RECEIPT", "ledgerAmountMinor": "75000", "ledgerDonorLabel": null, "messageContains": null }
+    }
+  ]
+}

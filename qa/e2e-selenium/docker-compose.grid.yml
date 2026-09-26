@@ -1,0 +1,40 @@
+# qa/e2e-selenium/docker-compose.grid.yml
+# Local/CI Selenium Grid 4: docker compose -f qa/e2e-selenium/docker-compose.grid.yml up -d
+# Then run tests with -Dgrid.url=http://localhost:4444
+# Pin the image tags to one exact Selenium release that matches selenium.version in pom.xml.
+services:
+  selenium-hub:
+    image: selenium/hub:4.49.0
+    ports:
+      - "4442:4442"
+      - "4443:4443"
+      - "4444:4444"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4444/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  chrome:
+    image: selenium/node-chrome:4.49.0
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: "4442"
+      SE_EVENT_BUS_SUBSCRIBE_PORT: "4443"
+      SE_NODE_MAX_SESSIONS: "4"
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+
+  firefox:
+    image: selenium/node-firefox:4.49.0
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: "4442"
+      SE_EVENT_BUS_SUBSCRIBE_PORT: "4443"
+      SE_NODE_MAX_SESSIONS: "2"
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
