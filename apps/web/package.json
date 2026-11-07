@@ -28,13 +28,13 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^24.13.6",
+    "@tailwindcss/postcss": "^4.3.4",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "oxlint": "^1.58.0",
-    "prettier": "^3.9.9",
+    "oxlint": "^1.91.0",
+    "prettier": "^3.9.10",
     "tailwindcss": "^4.3.3",
-    "typescript": "~6.0.3"
+    "typescript": "~7.0.2"
   }
 }
